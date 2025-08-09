@@ -330,3 +330,21 @@ def test_email(to: str):
     """Send a test email to validate SMTP setup."""
     send_email(to, 'Test AmaHunter SMTP', "<p>Ceci est un test d'envoi SMTP AmaHunter.</p>")
     return {"status": "ok"}
+
+    @app.get("/debug")
+def debug(asin: str, country: str = "FR"):
+    domain = COUNTRY_TO_DOMAIN[country]
+    geo = COUNTRY_TO_GEO[country]
+    payload = {
+        "source": "amazon_product",
+        "query": asin,
+        "domain": domain,
+        "geo_location": geo,
+        "parse": True
+    }
+    r = requests.post(OXY_ENDPOINT, auth=(OXY_USER, OXY_PASS), json=payload, timeout=60)
+    obj = r.json()
+    content = (obj.get("results") or [{}])[0].get("content") or {}
+    sample = {k: content.get(k) for k in ["price", "buybox", "buybox_winner", "availability", "title"]}
+    return {"country": country, "parsed_keys": sample, "has_content": bool(content)}
+
