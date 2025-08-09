@@ -348,3 +348,4 @@ def debug(asin: str, country: str = "FR"):
     sample = {k: content.get(k) for k in ["price", "buybox", "buybox_winner", "availability", "title"]}
     return {"country": country, "parsed_keys": sample, "has_content": bool(content)}
 
+
