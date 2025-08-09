@@ -1,4 +1,3 @@
-\
 import os
 import re
 import json
@@ -49,7 +48,7 @@ SMTP_USER = os.getenv('SMTP_USER')
 SMTP_PASS = os.getenv('SMTP_PASS')
 SMTP_FROM = os.getenv('SMTP_FROM', 'no-reply@amahunter.online')
 
-app = FastAPI(title='AmaHunter API', version='1.1.0')
+app = FastAPI(title='AmaHunter API', version='1.2.0')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
@@ -132,59 +131,94 @@ def affiliate_link(asin: str, country: str) -> str:
     return f"https://{domain}/dp/{asin}{tail}"
 
 def oxylabs_amazon_price(asin: str, country: str) -> Dict:
+    """
+    Tente d'abord le mode structuré Oxylabs (source=amazon_product, parse=true),
+    puis retombe sur le HTML brut (source=amazon) si besoin.
+    """
     if not (OXY_USER and OXY_PASS):
         raise HTTPException(status_code=500, detail='Oxylabs credentials missing')
 
-    domain = COUNTRY_TO_DOMAIN[country]
-    url = f"https://{domain}/dp/{asin}"
-    geo = COUNTRY_TO_GEO[country]
+    domain = COUNTRY_TO_DOMAIN[country]   # ex: amazon.fr
+    geo = COUNTRY_TO_GEO[country]         # ex: France
 
-    payload = {
-        "source": "amazon",
-        "url": url,
-        "geo_location": geo
+    # 1) ESSAI STRUCTURÉ (JSON déjà parsé par Oxylabs)
+    payload_parsed = {
+        "source": "amazon_product",
+        "query": asin,
+        "domain": domain,      # cible la bonne marketplace
+        "geo_location": geo,   # ex: France / Germany / Belgium
+        "parse": True
     }
-    resp = requests.post(OXY_ENDPOINT, auth=(OXY_USER, OXY_PASS), json=payload, timeout=60)
+    resp = requests.post(OXY_ENDPOINT, auth=(OXY_USER, OXY_PASS), json=payload_parsed, timeout=60)
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Oxylabs error: {resp.text}")
 
     data = resp.json()
-    html = data.get('results', [{}])[0].get('content', '')
-    if not html:
-        raise HTTPException(status_code=502, detail='Empty content from Oxylabs')
+    content = (data.get("results") or [{}])[0].get("content") or {}
 
     price = None
-    currency = 'EUR'
+    if isinstance(content, dict):
+        # chemins possibles renvoyés par Oxylabs
+        price = (content.get("buybox_winner") or {}).get("price") or content.get("price")
+        if price is None and "buybox" in content:
+            price = (content["buybox"] or {}).get("price")
 
-    # 1) Try a-offscreen spans (most common)
+        # parfois c'est une string "EUR 49,99"
+        if isinstance(price, str):
+            norm = (price.replace("\u202f","").replace("\xa0","")
+                         .replace("€","").replace("EUR","")
+                         .replace(".","").replace(",",".")).strip()
+            try:
+                price = float(re.findall(r"[0-9]+(?:\.[0-9]{1,2})?", norm)[0])
+            except Exception:
+                price = None
+
+        if isinstance(price, (int, float)):
+            return {"price": float(price), "currency": "EUR"}
+
+    # 2) FALLBACK HTML (source=amazon)
+    url = f"https://{domain}/dp/{asin}"
+    payload_html = {"source": "amazon", "url": url, "geo_location": geo}
+    resp2 = requests.post(OXY_ENDPOINT, auth=(OXY_USER, OXY_PASS), json=payload_html, timeout=60)
+    if resp2.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Oxylabs error: {resp2.text}")
+
+    html = (resp2.json().get("results") or [{}])[0].get("content") or ""
+    if not html:
+        raise HTTPException(status_code=502, detail="Empty content from Oxylabs")
+
+    price = None
+    currency = "EUR"
+
+    # 1) Tentative via BeautifulSoup sur <span class="a-offscreen">
     try:
         from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, 'html.parser')
-        span = soup.find('span', {'class': 'a-offscreen'})
+        soup = BeautifulSoup(html, "html.parser")
+        span = soup.find("span", {"class": "a-offscreen"})
         if span and span.text:
             price_txt = span.text
             price_num = (
-                price_txt.replace('\u202f', '').replace('\xa0', '').replace('€', '').replace('EUR', '')
-                .replace('.', '').replace(',', '.')
+                price_txt.replace("\u202f", "").replace("\xa0", "").replace("€", "").replace("EUR", "")
+                .replace(".", "").replace(",", ".")
             )
             price = float(re.findall(r"[0-9]+(?:\.[0-9]{1,2})?", price_num)[0])
     except Exception:
         price = None
 
-    # 2) Fallback: regex for numbers with € in raw HTML
+    # 2) Fallback regex direct sur le HTML si pas trouvé
     if price is None:
         m = re.search(r"([0-9][0-9\.,\s\u00A0\u202F]+)\s?(€|EUR)", html)
         if m:
             num = m.group(1)
-            num = num.replace('\u202f', '').replace('\xa0', '').replace(' ', '')
-            num = num.replace('.', '').replace(',', '.')
+            num = num.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
+            num = num.replace(".", "").replace(",", ".")
             try:
                 price = float(num)
             except Exception:
                 price = None
 
     if price is None:
-        raise HTTPException(status_code=404, detail='Price not found')
+        raise HTTPException(status_code=404, detail="Price not found")
 
     return {"price": price, "currency": currency}
 
@@ -206,6 +240,10 @@ def send_email(to: str, subject: str, html: str):
         s.send_message(msg)
 
 # -------------- ENDPOINTS -----------------
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "AmaHunter API"}
 
 @app.post('/compare', response_model=CompareResponse)
 def compare(req: CompareRequest):
