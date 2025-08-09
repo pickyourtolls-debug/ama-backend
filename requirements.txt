@@ -1,0 +1,7 @@
+fastapi==0.112.0
+uvicorn[standard]==0.30.0
+python-dotenv==1.0.1
+requests==2.32.3
+pydantic==2.8.2
+sqlite-utils==3.36
+beautifulsoup4==4.12.3
