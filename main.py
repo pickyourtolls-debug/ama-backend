@@ -206,54 +206,80 @@ def oxylabs_amazon_price(asin: str, country: str) -> Dict:
         raise HTTPException(status_code=502, detail=f"Oxylabs error: {resp2.text}")
 
     html = (resp2.json().get("results") or [{}])[0].get("content") or ""
-    if not html:
-        raise HTTPException(status_code=502, detail="Empty content from Oxylabs")
+   # --- HTML parsing renforcé (ajout JSON-LD) ---
+from bs4 import BeautifulSoup
+soup = BeautifulSoup(html, "html.parser")
 
-    # --- HTML parsing renforcé ---
+def pick_price_text():
+    # 1) pattern moderne
+    n = soup.select_one(".a-price .a-offscreen")
+    if n and n.get_text(strip=True): return n.get_text(strip=True)
+    # 2) apex desktop
+    n = soup.select_one("#apex_desktop .a-offscreen")
+    if n and n.get_text(strip=True): return n.get_text(strip=True)
+    # 3) core price feature
+    n = soup.select_one("#corePrice_feature_div .a-offscreen")
+    if n and n.get_text(strip=True): return n.get_text(strip=True)
+    # 4) anciens IDs
+    for sel in ["#priceblock_ourprice", "#priceblock_dealprice", "#priceblock_saleprice"]:
+        n = soup.select_one(sel)
+        if n and n.get_text(strip=True): return n.get_text(strip=True)
+    # 5) fallback large
+    n = soup.find("span", {"class": "a-offscreen"})
+    if n and n.get_text(strip=True): return n.get_text(strip=True)
+    return None
+
+price = None
+
+# A) JSON-LD (schema.org) – très fiable quand présent
+for script in soup.find_all("script", type="application/ld+json"):
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-
-        def pick_price_text():
-            # 1) pattern moderne
-            n = soup.select_one(".a-price .a-offscreen")
-            if n and n.get_text(strip=True):
-                return n.get_text(strip=True)
-            # 2) apex desktop
-            n = soup.select_one("#apex_desktop .a-offscreen")
-            if n and n.get_text(strip=True):
-                return n.get_text(strip=True)
-            # 3) core price feature
-            n = soup.select_one("#corePrice_feature_div .a-offscreen")
-            if n and n.get_text(strip=True):
-                return n.get_text(strip=True)
-            # 4) anciens IDs
-            for sel in ["#priceblock_ourprice", "#priceblock_dealprice", "#priceblock_saleprice"]:
-                n = soup.select_one(sel)
-                if n and n.get_text(strip=True):
-                    return n.get_text(strip=True)
-            # 5) fallback large
-            n = soup.find("span", {"class": "a-offscreen"})
-            if n and n.get_text(strip=True):
-                return n.get_text(strip=True)
-            return None
-
-        price_txt = pick_price_text()
-        price = None
-        if price_txt:
-            norm = (
-                price_txt.replace("\u202f", "")
-                .replace("\xa0", "")
-                .replace("€", "")
-                .replace("EUR", "")
-                .replace(".", "")
-                .replace(",", ".")
-            )
-            m = re.search(r"[0-9]+(?:\.[0-9]{1,2})?", norm)
-            if m:
-                price = float(m.group(0))
+        data = json.loads(script.string or "")
+        # parfois c'est une liste
+        if isinstance(data, list):
+            for d in data:
+                offer = (d.get("offers") or {})
+                val = offer.get("price") if isinstance(offer, dict) else None
+                if val:
+                    s = str(val).replace("\u202f","").replace("\xa0","").replace(",",".")
+                    m = re.search(r"[0-9]+(?:\.[0-9]{1,2})?", s)
+                    if m: 
+                        price = float(m.group(0))
+                        break
+        elif isinstance(data, dict):
+            offer = (data.get("offers") or {})
+            val = offer.get("price") if isinstance(offer, dict) else None
+            if val:
+                s = str(val).replace("\u202f","").replace("\xa0","").replace(",",".")
+                m = re.search(r"[0-9]+(?:\.[0-9]{1,2})?", s)
+                if m: 
+                    price = float(m.group(0))
     except Exception:
-        price = None
+        pass
+    if price is not None:
+        break
+
+# B) Si JSON-LD pas trouvé, lire le texte affiché
+if price is None:
+    price_txt = pick_price_text()
+    if price_txt:
+        norm = (price_txt.replace("\u202f","").replace("\xa0","")
+                        .replace("€","").replace("EUR","")
+                        .replace(".","").replace(",","."))
+        m = re.search(r"[0-9]+(?:\.[0-9]{1,2})?", norm)
+        if m:
+            price = float(m.group(0))
+
+# C) Fallback ultime : regex directe dans le HTML
+if price is None:
+    m = re.search(r"([0-9][0-9\.,\s\u00A0\u202F]+)\s?(€|EUR)", html)
+    if m:
+        num = m.group(1).replace("\u202f","").replace("\xa0","").replace(" ","")
+        num = num.replace(".","").replace(",",".")
+        try:
+            price = float(num)
+        except Exception:
+            price = None
 
     # Fallback ultime: regex directe dans le HTML
     if price is None:
